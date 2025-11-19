@@ -1,0 +1,34 @@
+# hw definition file for processing by chibios_pins.py
+# for AET H743-CH2O bootloader
+
+# MCU class and specific type
+MCU STM32H7xx STM32H743xx
+
+# board ID for firmware load
+APJ_BOARD_ID AP_HW_VVZERO-H743-DEV
+
+# crystal frequency, setup to use external oscillator
+OSCILLATOR_HZ 25000000
+
+FLASH_SIZE_KB 2048
+
+# bootloader starts at zero offset
+FLASH_RESERVE_START_KB 0
+
+# the location where the bootloader will put the firmware
+# the H743 has 128k sectors
+FLASH_BOOTLOADER_LOAD_KB 128
+
+# order of UARTs (and USB). Allow bootloading on USB
+SERIAL_ORDER OTG1
+
+# PA10 IO-debug-console
+PA11 OTG_FS_DM OTG1
+PA12 OTG_FS_DP OTG1
+
+PB4 LED_BOOTLOADER OUTPUT
+PA15 LED_ACTIVITY OUTPUT
+define HAL_LED_ON 1
+
+# Add CS pins to ensure they are high in bootloader
+PA4  IMU_CS CS
