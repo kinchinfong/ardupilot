@@ -365,6 +365,7 @@ AP_HW_AET-F405-CH4                   2026
 AP_HW_AET-H743-CH2O                  2027
 
 AP_HW_VVZERO-H743-DEV                2100
+AP_HW_VVZERO-F405-DEV                2101
 
 AP_HW_BOTWINGF405                    2501
 
