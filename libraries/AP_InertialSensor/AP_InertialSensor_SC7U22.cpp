@@ -82,6 +82,14 @@
 /* Soft reset command */
 #define SC7U22_CMD_SOFTRESET        0xA5
 
+/* SPI mode unlock command (from vendor driver) */
+#define SC7U22_SPI_UNLOCK_CMD       0x66
+
+/* Special register segment 1 for I2C disable */
+#define SC7U22_SEG_SEL_SPECIAL1     0x83
+#define SC7U22_REG_I2C_DISABLE      0x6F
+#define SC7U22_I2C_DISABLE_VAL      0x04
+
 /* Sample rate */
 #define SC7U22_BACKEND_SAMPLE_RATE  1600
 
@@ -408,6 +416,38 @@ bool AP_InertialSensor_SC7U22::_hardware_init()
 
     _dev->set_speed(AP_HAL::Device::SPEED_LOW);
 
+    /*
+     * SPI mode initialization: disable I2C interface
+     * This is required for proper SPI communication according to vendor driver.
+     * Reference: SL_SC7U22_AOI_Angle_Driver.c lines 57-70
+     * 
+     * Note: For SPI devices, the I2C interface must be disabled first.
+     * This sequence writes to special register segment 0x83 to disable I2C.
+     */
+    // Step 0-1: Enter normal register segment
+    _dev->write_register(SC7U22_REG_SEG_SEL, 0x00);
+    hal.scheduler->delay(1);
+
+    // Step 0-2: Write unlock command to enable special register access
+    _dev->write_register(SC7U22_REG_SOFT_RST, SC7U22_SPI_UNLOCK_CMD);
+    hal.scheduler->delay(1);
+
+    // Step 0-3: Enter special register segment 1 (0x83)
+    _dev->write_register(SC7U22_REG_SEG_SEL, SC7U22_SEG_SEL_SPECIAL1);
+    hal.scheduler->delay(1);
+
+    // Step 0-4: Disable I2C interface
+    _dev->write_register(SC7U22_REG_I2C_DISABLE, SC7U22_I2C_DISABLE_VAL);
+    hal.scheduler->delay(1);
+
+    // Step 0-5: Exit special register segment
+    _dev->write_register(SC7U22_REG_SEG_SEL, 0x00);
+    hal.scheduler->delay(1);
+
+    // Step 0-6: Clear unlock command
+    _dev->write_register(SC7U22_REG_SOFT_RST, 0x00);
+    hal.scheduler->delay(1);
+
     for (unsigned i = 0; i < SC7U22_HARDWARE_INIT_MAX_TRIES; i++) {
         uint8_t v;
 
@@ -425,7 +465,7 @@ bool AP_InertialSensor_SC7U22::_hardware_init()
         }
         hal.scheduler->delay(10);
 
-        // Step 3: Set BOOT bit before reset (reload calibration data)
+        // Step 3: Set Addr_Auto bit before reset (as per vendor driver)
         ret = _dev->write_register(SC7U22_REG_COM_CONF, SC7U22_ADDR_AUTO);
         if (!ret) {
             continue;
@@ -507,12 +547,9 @@ bool AP_InertialSensor_SC7U22::_hardware_init()
 
 bool AP_InertialSensor_SC7U22::_init()
 {
-    bool ret = false;
     _dev->set_read_flag(SC7U22_READ_FLAG);
 
-    DEV_PRINTF("SC7U22: initializing\n");
-
-    ret = _hardware_init();
+    bool ret = _hardware_init();
     if (!ret) {
         DEV_PRINTF("SC7U22: failed to init\n");
     }
