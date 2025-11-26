@@ -27,6 +27,8 @@
 #define SC7U22_REG_WHO_AM_I         0x01
 #define     SC7U22_CHIP_ID          0x6A
 #define SC7U22_REG_COM_CONF         0x04
+#define     SC7U22_COM_CONF_DEFAULT 0x50
+#define     SC7U22_COM_CONF_BOOT    0x80
 #define SC7U22_REG_DATA_STAT        0x0B
 #define SC7U22_REG_ACC_XH           0x0C
 #define SC7U22_REG_ACC_XL           0x0D
@@ -47,6 +49,7 @@
 #define SC7U22_REG_FIFO_DOWNS       0x45
 #define SC7U22_REG_SOFT_RST         0x4A
 #define SC7U22_REG_PWR_CTRL         0x7D
+#define SC7U22_REG_SEG_SEL          0x7F
 
 /* ACC_RANGE register bits */
 #define SC7U22_ACC_RANGE_2G         0x00
@@ -82,8 +85,9 @@
 /* Sample rate */
 #define SC7U22_BACKEND_SAMPLE_RATE  1600
 
-/* Datasheet says power-up time is about 50ms */
+/* Datasheet says power-up time is about 50ms, but vendor code uses 200ms after reset */
 #define SC7U22_POWERUP_DELAY_MSEC   50
+#define SC7U22_SOFTRESET_DELAY_MSEC 200
 
 /* Maximum number of samples to read from FIFO at once */
 #define SC7U22_MAX_FIFO_SAMPLES     8
@@ -93,17 +97,22 @@
 
 extern const AP_HAL::HAL& hal;
 
+/*
+ * FIFO data format (without header mode):
+ * According to vendor driver and datasheet register description,
+ * data order is: ACC_X, ACC_Y, ACC_Z, GYR_X, GYR_Y, GYR_Z
+ */
 struct PACKED RawData {
     struct {
         be16_t x;
         be16_t y;
         be16_t z;
-    } accel;
+    } accel;  // ACC data comes first (offset 0-5)
     struct {
         be16_t x;
         be16_t y;
         be16_t z;
-    } gyro;
+    } gyro;   // GYR data comes second (offset 6-11)
 };
 
 AP_InertialSensor_SC7U22::AP_InertialSensor_SC7U22(AP_InertialSensor &imu,
@@ -402,43 +411,84 @@ bool AP_InertialSensor_SC7U22::_hardware_init()
     for (unsigned i = 0; i < SC7U22_HARDWARE_INIT_MAX_TRIES; i++) {
         uint8_t v;
 
-        // Perform soft reset
+        // Step 1: Exit special register segment (ensure we're in normal register space)
+        ret = _dev->write_register(SC7U22_REG_SEG_SEL, 0x00);
+        if (!ret) {
+            continue;
+        }
+        hal.scheduler->delay(1);
+
+        // Step 2: Power down all sensors first (as per vendor driver)
+        ret = _dev->write_register(SC7U22_REG_PWR_CTRL, 0x00);
+        if (!ret) {
+            continue;
+        }
+        hal.scheduler->delay(10);
+
+        // Step 3: Set BOOT bit before reset (reload calibration data)
+        ret = _dev->write_register(SC7U22_REG_COM_CONF, SC7U22_ADDR_AUTO);
+        if (!ret) {
+            continue;
+        }
+        hal.scheduler->delay(1);
+
+        // Step 4: Perform soft reset (write twice as per datasheet)
         ret = _dev->write_register(SC7U22_REG_SOFT_RST, SC7U22_CMD_SOFTRESET);
         if (!ret) {
             continue;
         }
         hal.scheduler->delay(1);
 
-        // Write again to complete reset sequence
         ret = _dev->write_register(SC7U22_REG_SOFT_RST, SC7U22_CMD_SOFTRESET);
         if (!ret) {
             continue;
         }
-        hal.scheduler->delay(SC7U22_POWERUP_DELAY_MSEC);
 
-        // Check chip ID
+        // Step 5: Wait for reset to complete (vendor driver uses 200ms)
+        hal.scheduler->delay(SC7U22_SOFTRESET_DELAY_MSEC);
+
+        // Step 6: Check chip ID
         ret = _dev->read_registers(SC7U22_REG_WHO_AM_I, &v, 1);
         if (!ret) {
             continue;
         }
         if (v != SC7U22_CHIP_ID) {
+            DEV_PRINTF("SC7U22: unexpected chip ID 0x%02x\n", v);
             ret = false;
             continue;
         }
 
-        // Enable address auto-increment and block data update
+        // Step 7: Verify COM_CONF has reset to default value (0x50)
+        ret = _dev->read_registers(SC7U22_REG_COM_CONF, &v, 1);
+        if (!ret) {
+            continue;
+        }
+        if (v != SC7U22_COM_CONF_DEFAULT) {
+            DEV_PRINTF("SC7U22: COM_CONF not reset properly, got 0x%02x\n", v);
+            ret = false;
+            continue;
+        }
+
+        // Step 8: Configure COM_CONF - enable address auto-increment and block data update
         ret = _dev->write_register(SC7U22_REG_COM_CONF, SC7U22_ADDR_AUTO | SC7U22_BDU);
         if (!ret) {
             continue;
         }
         hal.scheduler->delay(1);
 
-        // Enable accelerometer and gyroscope
+        // Step 9: Enable accelerometer, gyroscope and temperature sensor
         ret = _dev->write_register(SC7U22_REG_PWR_CTRL, SC7U22_ACC_EN | SC7U22_GYR_EN | SC7U22_TEMP_EN);
         if (!ret) {
             continue;
         }
-        hal.scheduler->delay(10);  // Wait for sensors to power up
+        hal.scheduler->delay(10);
+
+        // Step 10: Write PWR_CTRL again to ensure it takes effect (as per vendor driver)
+        ret = _dev->write_register(SC7U22_REG_PWR_CTRL, SC7U22_ACC_EN | SC7U22_GYR_EN | SC7U22_TEMP_EN);
+        if (!ret) {
+            continue;
+        }
+        hal.scheduler->delay(10);
 
         DEV_PRINTF("SC7U22 initialized after %d retries\n", i+1);
         break;
@@ -460,11 +510,11 @@ bool AP_InertialSensor_SC7U22::_init()
     bool ret = false;
     _dev->set_read_flag(SC7U22_READ_FLAG);
 
-    GCS_SEND_TEXT(MAV_SEVERITY_DEBUG, "SC7U22: initializing\n");
+    DEV_PRINTF("SC7U22: initializing\n");
 
     ret = _hardware_init();
     if (!ret) {
-        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "SC7U22: failed to init\n");
+        DEV_PRINTF("SC7U22: failed to init\n");
     }
 
     return ret;
